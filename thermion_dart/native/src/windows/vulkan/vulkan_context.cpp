@@ -31,7 +31,33 @@ class ThermionVulkanContext::Impl {
 
         ~Impl() {
             std::cerr << "ThermionVulkanContext destructor " << _vulkanTextures.size() << " Vulkan textures / " << _d3dTextures.size() << " D3D textures remain" << std::endl;
+            
+            // Clear textures before destroying device
+            _vulkanTextures.clear();
+            _d3dTextures.clear();
+            
             _d3dContext = std::nullptr_t();
+            _platform = nullptr;
+
+            if (sharedSemaphore != VK_NULL_HANDLE) {
+                vkDestroySemaphore(device, sharedSemaphore, nullptr);
+            }
+
+            if (blitCommandBuffer != VK_NULL_HANDLE) {
+                vkFreeCommandBuffers(device, commandPool, 1, &blitCommandBuffer);
+            }
+
+            if (commandPool != VK_NULL_HANDLE) {
+                vkDestroyCommandPool(device, commandPool, nullptr);
+            }
+
+            if (device != VK_NULL_HANDLE) {
+                vkDestroyDevice(device, nullptr);
+            }
+
+            if (instance != VK_NULL_HANDLE) {
+                vkDestroyInstance(instance, nullptr);
+            }
         }
         
         Impl() {
@@ -185,7 +211,9 @@ class ThermionVulkanContext::Impl {
 
         HANDLE CreateRenderingSurface(uint32_t width, uint32_t height, uint32_t left, uint32_t top) {
             std::cerr << "[DIAG] CreateRenderingSurface ENTER thread=" << std::this_thread::get_id()
-                      << " (NO MUTEX - potential race!)" << std::endl;
+                      << " (acquiring mutex)" << std::endl;
+
+            std::lock_guard<std::mutex> lock(_platform->mutex);
 
             Log("Creating Vulkan texture %dx%d", width, height);
 
@@ -214,7 +242,10 @@ class ThermionVulkanContext::Impl {
     
         void DestroyRenderingSurface(HANDLE handle) {
             std::cerr << "[DIAG] DestroyRenderingSurface ENTER thread=" << std::this_thread::get_id()
-                      << " handle=" << handle << " (NO MUTEX - potential race!)" << std::endl;
+                      << " handle=" << handle << " (acquiring mutex)" << std::endl;
+            
+            std::lock_guard<std::mutex> lock(_platform->mutex);
+
             std::cerr << "[DIAG] DestroyRenderingSurface modifying vectors, size before: vk="
                       << _vulkanTextures.size() << " d3d=" << _d3dTextures.size() << std::endl;
 
@@ -286,7 +317,8 @@ class ThermionVulkanContext::Impl {
                 waitInfo.pSemaphores = &sharedSemaphore;
                 waitInfo.pValues = &currentSemaphoreValue;
 
-                VkResult waitResult = bluevk::vkWaitSemaphores(device, &waitInfo, UINT64_MAX);
+                // 5 seconds timeout
+                VkResult waitResult = bluevk::vkWaitSemaphores(device, &waitInfo, 5000000000ULL);
                 if (waitResult != VK_SUCCESS) {
                     ERROR("vkWaitSemaphores failed: %d (waiting for value %llu)", waitResult, currentSemaphoreValue);
                     std::cerr << "[DIAG] BlitFromSwapchain EXIT (wait failed) thread=" << std::this_thread::get_id() << std::endl;
@@ -294,7 +326,7 @@ class ThermionVulkanContext::Impl {
                 }
             }
 
-            VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, 0);
+            VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 
             if (result != VK_SUCCESS) {
                 ERROR("Failed to reset command buffer: %d", result);
