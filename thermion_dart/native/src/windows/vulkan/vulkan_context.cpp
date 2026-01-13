@@ -266,7 +266,11 @@ class ThermionVulkanContext::Impl {
                 waitInfo.pSemaphores = &sharedSemaphore;
                 waitInfo.pValues = &currentSemaphoreValue;
 
-                bluevk::vkWaitSemaphores(device, &waitInfo, UINT64_MAX);
+                VkResult waitResult = bluevk::vkWaitSemaphores(device, &waitInfo, UINT64_MAX);
+                if (waitResult != VK_SUCCESS) {
+                    ERROR("vkWaitSemaphores failed: %d", waitResult);
+                    return;
+                }
             }
 
             VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, 0); 
@@ -386,35 +390,36 @@ class ThermionVulkanContext::Impl {
                 return;
             }
 
-            uint64_t signalValue = ++currentSemaphoreValue;
+            // Prepare signal value but don't increment yet - only after successful submit
+            uint64_t signalValue = currentSemaphoreValue + 1;
 
-            // 2. Setup Timeline Submit Info
+            // Setup Timeline Submit Info
             VkTimelineSemaphoreSubmitInfo timelineInfo{};
             timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
             timelineInfo.signalSemaphoreValueCount = 1;
             timelineInfo.pSignalSemaphoreValues = &signalValue;
 
-            // 3. Setup Standard Submit Info
+            // Setup Standard Submit Info
             VkSubmitInfo submitInfo{};
             submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             submitInfo.pNext = &timelineInfo; // Chain the timeline info
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &blitCommandBuffer;
-            
+
             // Define the semaphore to signal
             submitInfo.signalSemaphoreCount = 1;
             submitInfo.pSignalSemaphores = &sharedSemaphore;
 
             result = bluevk::vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
 
-            _d3dContext->SetWaitForSemaphore(signalValue);
-
-
             if (result != VK_SUCCESS) {
-                std::cout << "Failed to submit queue: " << result << std::endl;
-                // bluevk::vkDestroyFence(device, fence, nullptr);
+                ERROR("Failed to submit queue: %d", result);
                 return;
             }
+
+            // Only update semaphore value and notify D3D after successful submit
+            currentSemaphoreValue = signalValue;
+            _d3dContext->SetWaitForSemaphore(signalValue);
         }
 
         void readPixelsFromImage(

@@ -573,6 +573,25 @@ VkResult createLogicalDevice(VkInstance instance, VkPhysicalDevice *physicalDevi
     *physicalDevice = physicalDevices[0];
     *queueFamilyIndex = findGraphicsQueueFamily(*physicalDevice);
 
+    // Check timeline semaphore support before proceeding
+    VkPhysicalDeviceTimelineSemaphoreFeatures supportedTimelineFeatures{};
+    supportedTimelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+
+    VkPhysicalDeviceFeatures2 supportedFeatures{};
+    supportedFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    supportedFeatures.pNext = &supportedTimelineFeatures;
+
+    vkGetPhysicalDeviceFeatures2(*physicalDevice, &supportedFeatures);
+
+    if (supportedTimelineFeatures.timelineSemaphore != VK_TRUE) {
+        std::cerr << "[ERROR] Timeline semaphores are not supported by this device. "
+                  << "This feature is required for D3D11/Vulkan interop. "
+                  << "Please update your graphics driver or use a different GPU." << std::endl;
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+
+    std::cout << "[INFO] Timeline semaphore support confirmed" << std::endl;
+
     std::vector<const char *> deviceExtensions = {
         VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
@@ -598,7 +617,7 @@ VkResult createLogicalDevice(VkInstance instance, VkPhysicalDevice *physicalDevi
     queueCreateInfo.queueCount = requestedQueueCount;
     queueCreateInfo.pQueuePriorities = queuePriorities;
 
-    // Enable timeline semaphore feature
+    // Enable timeline semaphore feature (already verified as supported above)
     VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeatures{};
     timelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
     timelineFeatures.timelineSemaphore = VK_TRUE;
