@@ -3,17 +3,27 @@
 #include "vulkan_utils.h"
 #include "Log.hpp"
 #include <iostream>
+#include <atomic>
 
 namespace thermion::windows::vulkan
 {
+    // Diagnostic: track VkDeviceMemory allocation count to detect leaks
+    static std::atomic<int> g_vkDeviceMemoryCount{0};
 
-    VulkanTexture::VulkanTexture(VkImage image, VkDevice device, VkDeviceMemory imageMemory, uint32_t width, uint32_t height, HANDLE d3dTextureHandle) : _image(image), _device(device),  _imageMemory(imageMemory), _width(width), _height(height), _d3dTextureHandle(d3dTextureHandle) {};
+    VulkanTexture::VulkanTexture(VkImage image, VkDevice device, VkDeviceMemory imageMemory, uint32_t width, uint32_t height, HANDLE d3dTextureHandle) : _image(image), _device(device),  _imageMemory(imageMemory), _width(width), _height(height), _d3dTextureHandle(d3dTextureHandle) {
+        int count = ++g_vkDeviceMemoryCount;
+        std::cerr << "[DIAG] VulkanTexture created, VkDeviceMemory count: " << count << std::endl;
+    }
 
     VulkanTexture::~VulkanTexture() {
+        int count = --g_vkDeviceMemoryCount;
+        std::cerr << "[DIAG] VulkanTexture destroying, VkDeviceMemory count after: " << count
+                  << " (NOTE: vkFreeMemory NOT called - potential leak)" << std::endl;
+
         bluevk::vkDeviceWaitIdle(_device);
         if(_image != VK_NULL_HANDLE) {
             bluevk::vkDestroyImage(_device, _image, nullptr);
-        } else { 
+        } else {
             std::cout << "Warning : no vkImage found" << std::endl;
         }
 

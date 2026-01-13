@@ -184,7 +184,9 @@ class ThermionVulkanContext::Impl {
         }
 
         HANDLE CreateRenderingSurface(uint32_t width, uint32_t height, uint32_t left, uint32_t top) {
-            
+            std::cerr << "[DIAG] CreateRenderingSurface ENTER thread=" << std::this_thread::get_id()
+                      << " (NO MUTEX - potential race!)" << std::endl;
+
             Log("Creating Vulkan texture %dx%d", width, height);
 
             // creates the D3D texture
@@ -193,41 +195,50 @@ class ThermionVulkanContext::Impl {
             auto vkTexture = VulkanTexture::create(device, physicalDevice, width, height, d3dTextureHandle);
 
             if(!vkTexture) {
+                std::cerr << "[DIAG] CreateRenderingSurface EXIT (failed) thread=" << std::this_thread::get_id() << std::endl;
                 return NULL;
             }
 
             // fillImageWithColor(device, commandPool, queue, image, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED,  // Current image layout
             //     { width, height, 1 }, // Image extent
             //     0.0f, 1.0f, 0.0f, 1.0f);    // Red color (RGBA))
-            
+
+            std::cerr << "[DIAG] CreateRenderingSurface modifying vectors, size before: vk="
+                      << _vulkanTextures.size() << " d3d=" << _d3dTextures.size() << std::endl;
             _d3dTextures.push_back(std::move(d3dTexture));
             _vulkanTextures.push_back(std::move(vkTexture));
+            std::cerr << "[DIAG] CreateRenderingSurface EXIT thread=" << std::this_thread::get_id()
+                      << " size after: vk=" << _vulkanTextures.size() << " d3d=" << _d3dTextures.size() << std::endl;
             return d3dTextureHandle;
         }
     
         void DestroyRenderingSurface(HANDLE handle) {
-            std::cerr << "Destroying rendering surface " << handle << std::endl;
+            std::cerr << "[DIAG] DestroyRenderingSurface ENTER thread=" << std::this_thread::get_id()
+                      << " handle=" << handle << " (NO MUTEX - potential race!)" << std::endl;
+            std::cerr << "[DIAG] DestroyRenderingSurface modifying vectors, size before: vk="
+                      << _vulkanTextures.size() << " d3d=" << _d3dTextures.size() << std::endl;
+
             auto vulkanNewEnd = std::remove_if(_vulkanTextures.begin(), _vulkanTextures.end(), [=](auto&& vkTexture) {
                 return vkTexture->GetD3DTextureHandle() == handle;
             });
-            
+
             if (vulkanNewEnd != _vulkanTextures.end()) {
                 _vulkanTextures.erase(vulkanNewEnd, _vulkanTextures.end());
-            } else { 
+            } else {
                 std::cerr << "Vulkan texture not found?" << std::endl;
             }
-            
+
             auto d3dNewEnd = std::remove_if(_d3dTextures.begin(), _d3dTextures.end(), [=](auto&& d3dTexture) {
                 return d3dTexture->GetTextureHandle() == handle;
             });
-            
+
             if (d3dNewEnd != _d3dTextures.end()) {
                 _d3dTextures.erase(d3dNewEnd, _d3dTextures.end());
-            } else { 
+            } else {
                 std::cerr << "D3D texture not found?" << std::endl;
             }
-            std::cerr << "Rendering surface destroyed, " << _vulkanTextures.size() << " Vulkan textures / " << _d3dTextures.size() << " D3D textures remain" << std::endl;
-
+            std::cerr << "[DIAG] DestroyRenderingSurface EXIT thread=" << std::this_thread::get_id()
+                      << " size after: vk=" << _vulkanTextures.size() << " d3d=" << _d3dTextures.size() << std::endl;
         }
 
         void Flush() {
@@ -235,21 +246,30 @@ class ThermionVulkanContext::Impl {
         }
 
         void BlitFromSwapchain() {
-            
+            std::cerr << "[DIAG] BlitFromSwapchain ENTER thread=" << std::this_thread::get_id()
+                      << " (acquiring _platform->mutex)" << std::endl;
+
             std::lock_guard lock(_platform->mutex);
+            std::cerr << "[DIAG] BlitFromSwapchain mutex acquired, accessing vectors: vk="
+                      << _vulkanTextures.size() << " d3d=" << _d3dTextures.size() << std::endl;
+
             if(!_platform->current) {
                 ERROR("No platform");
+                std::cerr << "[DIAG] BlitFromSwapchain EXIT (no platform) thread=" << std::this_thread::get_id() << std::endl;
                 return;
             }
 
             if(_d3dTextures.size() == 0) {
                 ERROR("No D3D textures");
+                std::cerr << "[DIAG] BlitFromSwapchain EXIT (no textures) thread=" << std::this_thread::get_id() << std::endl;
                 return;
             }
 
+            std::cerr << "[DIAG] BlitFromSwapchain calling _vulkanTextures.back()" << std::endl;
             auto&& vkTexture = _vulkanTextures.back();
             auto image = vkTexture->GetImage();
 
+            std::cerr << "[DIAG] BlitFromSwapchain calling _d3dTextures.back()" << std::endl;
             auto&& texture = _d3dTextures.back();
 
             auto height = texture->GetHeight();
@@ -268,15 +288,17 @@ class ThermionVulkanContext::Impl {
 
                 VkResult waitResult = bluevk::vkWaitSemaphores(device, &waitInfo, UINT64_MAX);
                 if (waitResult != VK_SUCCESS) {
-                    ERROR("vkWaitSemaphores failed: %d", waitResult);
+                    ERROR("vkWaitSemaphores failed: %d (waiting for value %llu)", waitResult, currentSemaphoreValue);
+                    std::cerr << "[DIAG] BlitFromSwapchain EXIT (wait failed) thread=" << std::this_thread::get_id() << std::endl;
                     return;
                 }
             }
 
-            VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, 0); 
+            VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, 0);
 
             if (result != VK_SUCCESS) {
-                std::cout << "Failed to allocate command buffer: " << result << std::endl;
+                ERROR("Failed to reset command buffer: %d", result);
+                std::cerr << "[DIAG] BlitFromSwapchain EXIT (reset failed) thread=" << std::this_thread::get_id() << std::endl;
                 return;
             }
 
@@ -287,7 +309,8 @@ class ThermionVulkanContext::Impl {
             
             result = bluevk::vkBeginCommandBuffer(blitCommandBuffer, &beginInfo);
             if (result != VK_SUCCESS) {
-                std::cout << "Failed to begin command buffer: " << result << std::endl;
+                ERROR("Failed to begin command buffer: %d (semaphore value: %llu)", result, currentSemaphoreValue);
+                std::cerr << "[DIAG] BlitFromSwapchain EXIT (begin failed) thread=" << std::this_thread::get_id() << std::endl;
                 return;
             }
 
@@ -386,7 +409,8 @@ class ThermionVulkanContext::Impl {
             // End command buffer
             result = bluevk::vkEndCommandBuffer(blitCommandBuffer);
             if (result != VK_SUCCESS) {
-                std::cout << "Failed to end command buffer: " << result << std::endl;
+                ERROR("Failed to end command buffer: %d", result);
+                std::cerr << "[DIAG] BlitFromSwapchain EXIT (end failed) thread=" << std::this_thread::get_id() << std::endl;
                 return;
             }
 
@@ -414,12 +438,14 @@ class ThermionVulkanContext::Impl {
 
             if (result != VK_SUCCESS) {
                 ERROR("Failed to submit queue: %d", result);
+                std::cerr << "[DIAG] BlitFromSwapchain EXIT (submit failed) thread=" << std::this_thread::get_id() << std::endl;
                 return;
             }
 
             // Only update semaphore value and notify D3D after successful submit
             currentSemaphoreValue = signalValue;
             _d3dContext->SetWaitForSemaphore(signalValue);
+            std::cerr << "[DIAG] BlitFromSwapchain EXIT (success) thread=" << std::this_thread::get_id() << std::endl;
         }
 
         void readPixelsFromImage(
