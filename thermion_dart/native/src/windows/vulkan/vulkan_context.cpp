@@ -241,7 +241,22 @@ class ThermionVulkanContext::Impl {
             auto bundle = _platform->getSwapChainBundle(_platform->current);
             VkImage swapchainImage = bundle.colors[_platform->currentColorIndex];
 
-            VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+            if (currentSemaphoreValue > 0) {
+                uint64_t waitValue = currentSemaphoreValue;
+                VkSemaphoreWaitInfo waitInfo{};
+                waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                waitInfo.semaphoreCount = 1;
+                waitInfo.pSemaphores = &sharedSemaphore;
+                waitInfo.pValues = &waitValue;
+
+                VkResult waitResult = bluevk::vkWaitSemaphores(device, &waitInfo, UINT64_MAX);
+                if (waitResult != VK_SUCCESS) {
+                    std::cout << "Failed to wait for blit semaphore: " << waitResult << std::endl;
+                    return;
+                }
+            }
+
+            VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, 0);
 
             if (result != VK_SUCCESS) {
                 std::cout << "Failed to allocate command buffer: " << result << std::endl;
@@ -358,7 +373,7 @@ class ThermionVulkanContext::Impl {
                 return;
             }
 
-            uint64_t signalValue = ++currentSemaphoreValue;
+            uint64_t signalValue = currentSemaphoreValue + 1;
 
             // 2. Setup Timeline Submit Info
             VkTimelineSemaphoreSubmitInfo timelineInfo{};
@@ -378,15 +393,14 @@ class ThermionVulkanContext::Impl {
             submitInfo.pSignalSemaphores = &sharedSemaphore;
 
             result = bluevk::vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-
-            _d3dContext->SetWaitForSemaphore(signalValue);
-
-
             if (result != VK_SUCCESS) {
                 std::cout << "Failed to submit queue: " << result << std::endl;
                 // bluevk::vkDestroyFence(device, fence, nullptr);
                 return;
             }
+
+            currentSemaphoreValue = signalValue;
+            _d3dContext->SetWaitForSemaphore(signalValue);
         }
 
         void readPixelsFromImage(
