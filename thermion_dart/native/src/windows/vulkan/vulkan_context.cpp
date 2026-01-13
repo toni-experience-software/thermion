@@ -485,14 +485,29 @@ class ThermionVulkanContext::Impl {
             uint32_t height,
             std::vector<uint8_t>& outPixels) {
 
+            if (_vulkanTextures.empty()) {
+                ERROR("No Vulkan textures available for readPixelsFromImage");
+                return;
+            }
+
             auto&& vkTexture = _vulkanTextures.back();
             auto image = vkTexture->GetImage();
         
             VkDeviceSize bufferSize = width * height * 4; // RGBA8 format
             
             // Create staging buffer
-            VkBuffer stagingBuffer;
-            VkDeviceMemory stagingBufferMemory;
+            VkBuffer stagingBuffer = VK_NULL_HANDLE;
+            VkDeviceMemory stagingBufferMemory = VK_NULL_HANDLE;
+            VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+            VkFence fence = VK_NULL_HANDLE;
+
+            // Helper for cleanup to ensure resources are freed
+            auto cleanup = [&]() {
+                if (fence != VK_NULL_HANDLE) bluevk::vkDestroyFence(device, fence, nullptr);
+                if (commandBuffer != VK_NULL_HANDLE) vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+                if (stagingBuffer != VK_NULL_HANDLE) vkDestroyBuffer(device, stagingBuffer, nullptr);
+                if (stagingBufferMemory != VK_NULL_HANDLE) vkFreeMemory(device, stagingBufferMemory, nullptr);
+            };
             
             VkBufferCreateInfo bufferInfo{};
             bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -502,7 +517,9 @@ class ThermionVulkanContext::Impl {
             
             VkResult result = bluevk::vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer);
             if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to create staging buffer");
+                ERROR("Failed to create staging buffer: %d", result);
+                cleanup();
+                return;
             }
             
             // Get memory requirements and allocate
@@ -520,15 +537,16 @@ class ThermionVulkanContext::Impl {
             
             result = bluevk::vkAllocateMemory(device, &allocInfo, nullptr, &stagingBufferMemory);
             if (result != VK_SUCCESS) {
-                bluevk::vkDestroyBuffer(device, stagingBuffer, nullptr);
-                throw std::runtime_error("Failed to allocate staging buffer memory");
+                ERROR("Failed to allocate staging buffer memory: %d", result);
+                cleanup();
+                return;
             }
             
             result = bluevk::vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
             if (result != VK_SUCCESS) {
-                vkFreeMemory(device, stagingBufferMemory, nullptr);
-                vkDestroyBuffer(device, stagingBuffer, nullptr);
-                throw std::runtime_error("Failed to bind buffer memory");
+                ERROR("Failed to bind buffer memory: %d", result);
+                cleanup();
+                return;
             }
             
             // Create command buffer
@@ -538,10 +556,11 @@ class ThermionVulkanContext::Impl {
             cmdBufAllocInfo.commandPool = commandPool;
             cmdBufAllocInfo.commandBufferCount = 1;
             
-            VkCommandBuffer commandBuffer;
             result = bluevk::vkAllocateCommandBuffers(device, &cmdBufAllocInfo, &commandBuffer);
             if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to allocate command buffer");
+                ERROR("Failed to allocate command buffer: %d", result);
+                cleanup();
+                return;
             }
             
             // Begin command buffer
@@ -551,7 +570,9 @@ class ThermionVulkanContext::Impl {
             
             result = bluevk::vkBeginCommandBuffer(commandBuffer, &beginInfo);
             if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to begin command buffer");
+                ERROR("Failed to begin command buffer: %d", result);
+                cleanup();
+                return;
             }
             
             // Transition image layout for transfer with proper sync
@@ -619,17 +640,20 @@ class ThermionVulkanContext::Impl {
             
             result = bluevk::vkEndCommandBuffer(commandBuffer);
             if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to end command buffer");
+                ERROR("Failed to end command buffer: %d", result);
+                cleanup();
+                return;
             }
             
             // Submit command buffer with fence for synchronization
             VkFenceCreateInfo fenceInfo{};
             fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
             
-            VkFence fence;
             result = bluevk::vkCreateFence(device, &fenceInfo, nullptr, &fence);
             if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to create fence");
+                ERROR("Failed to create fence: %d", result);
+                cleanup();
+                return;
             }
             
             VkSubmitInfo submitInfo{};
@@ -639,33 +663,34 @@ class ThermionVulkanContext::Impl {
             
             result = bluevk::vkQueueSubmit(queue, 1, &submitInfo, fence);
             if (result != VK_SUCCESS) {
-                bluevk::vkDestroyFence(device, fence, nullptr);
-                throw std::runtime_error("Failed to submit queue");
+                ERROR("Failed to submit queue: %d", result);
+                cleanup();
+                return;
             }
             
             // Wait for the command buffer to complete with timeout
-            result = bluevk::vkWaitForFences(device, 1, &fence, VK_TRUE, 5000000000); // 5 second timeout
+            result = bluevk::vkWaitForFences(device, 1, &fence, VK_TRUE, 5000000000ULL); // 5 second timeout
             if (result != VK_SUCCESS) {
-                bluevk::vkDestroyFence(device, fence, nullptr);
-                throw std::runtime_error("Failed to wait for fence");
+                ERROR("Failed to wait for fence (timeout?): %d", result);
+                cleanup();
+                return;
             }
             
             // Map memory and copy data
             void* data;
             result = bluevk::vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
             if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to map memory");
+                ERROR("Failed to map memory: %d", result);
+                cleanup();
+                return;
             }
             
             outPixels.resize(bufferSize);
             memcpy(outPixels.data(), data, bufferSize);
             bluevk::vkUnmapMemory(device, stagingBufferMemory);
             
-            // Cleanup
-            bluevk::vkDestroyFence(device, fence, nullptr);
-            vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
-            vkDestroyBuffer(device, stagingBuffer, nullptr);
-            vkFreeMemory(device, stagingBufferMemory, nullptr);
+            // Cleanup on success
+            cleanup();
             
             std::cout << "Successfully completed readPixelsFromImage" << std::endl;
         }
