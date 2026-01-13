@@ -58,20 +58,37 @@ class ThermionVulkanContext::Impl {
             _sharedContext.physicalDevice = physicalDevice;
             _sharedContext.logicalDevice = device;
             _sharedContext.graphicsQueueFamilyIndex = queueFamilyIndex;
-            _sharedContext.graphicsQueueIndex = 0;
             _sharedContext.debugUtilsSupported = false;
             _sharedContext.debugMarkersSupported = false;
             _sharedContext.multiviewSupported = false;
 
+            // Check how many queues are available to determine if we can use separate queues
+            uint32_t queueFamilyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+            std::vector<VkQueueFamilyProperties> queueFamilyProps(queueFamilyCount);
+            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilyProps.data());
+
+            uint32_t availableQueues = queueFamilyProps[queueFamilyIndex].queueCount;
+            // Use queue index 1 for Filament if 2 queues available, otherwise share queue 0
+            _sharedContext.graphicsQueueIndex = (availableQueues >= 2) ? 1 : 0;
+
             std::cout << "[INFO] Vulkan logical device created with queue family index "
-                      << queueFamilyIndex << std::endl;
+                      << queueFamilyIndex << ", Filament using queue index "
+                      << _sharedContext.graphicsQueueIndex << std::endl;
 
             CommandResources cmdResources = createCommandResources(device, physicalDevice);
 
             commandPool = cmdResources.commandPool;
             queue = cmdResources.queue;
+
+            // Validate queue family indices match
+            if (cmdResources.queueFamilyIndex != queueFamilyIndex) {
+                std::cerr << "[WARNING] Queue family index mismatch: device created with "
+                          << queueFamilyIndex << ", command resources using "
+                          << cmdResources.queueFamilyIndex << std::endl;
+            }
             std::cout << "[INFO] Vulkan command resources using queue family index "
-                      << cmdResources.queueFamilyIndex << std::endl;
+                      << cmdResources.queueFamilyIndex << " (blit uses queue index 0)" << std::endl;
 
             VkPhysicalDeviceExternalImageFormatInfo externFormatInfo = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
@@ -241,6 +258,17 @@ class ThermionVulkanContext::Impl {
             auto bundle = _platform->getSwapChainBundle(_platform->current);
             VkImage swapchainImage = bundle.colors[_platform->currentColorIndex];
 
+            // Wait for previous blit to complete before resetting command buffer
+            if (currentSemaphoreValue > 0) {
+                VkSemaphoreWaitInfo waitInfo{};
+                waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                waitInfo.semaphoreCount = 1;
+                waitInfo.pSemaphores = &sharedSemaphore;
+                waitInfo.pValues = &currentSemaphoreValue;
+
+                bluevk::vkWaitSemaphores(device, &waitInfo, UINT64_MAX);
+            }
+
             VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, 0); 
 
             if (result != VK_SUCCESS) {
@@ -296,8 +324,8 @@ class ThermionVulkanContext::Impl {
             VkImageMemoryBarrier preBlitBarriers[] = {srcBarrier, dstBarrier};
             vkCmdPipelineBarrier(
                 blitCommandBuffer,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
-                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
                 0,
                 0, nullptr,
                 0, nullptr,

@@ -581,15 +581,31 @@ VkResult createLogicalDevice(VkInstance instance, VkPhysicalDevice *physicalDevi
         VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
         VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME, };
 
-    float queuePriority = 1.0f;
+    // Check how many queues are available in this queue family
+    uint32_t queueFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(*physicalDevice, &queueFamilyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> queueFamilyProps(queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(*physicalDevice, &queueFamilyCount, queueFamilyProps.data());
+
+    uint32_t availableQueues = queueFamilyProps[*queueFamilyIndex].queueCount;
+    // Request 2 queues if available (one for blit, one for Filament), otherwise fall back to 1
+    uint32_t requestedQueueCount = (availableQueues >= 2) ? 2 : 1;
+
+    float queuePriorities[] = {1.0f, 1.0f};
     VkDeviceQueueCreateInfo queueCreateInfo = {};
     queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     queueCreateInfo.queueFamilyIndex = *queueFamilyIndex;
-    queueCreateInfo.queueCount = 1;
-    queueCreateInfo.pQueuePriorities = &queuePriority;
+    queueCreateInfo.queueCount = requestedQueueCount;
+    queueCreateInfo.pQueuePriorities = queuePriorities;
+
+    // Enable timeline semaphore feature
+    VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeatures{};
+    timelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    timelineFeatures.timelineSemaphore = VK_TRUE;
 
     VkDeviceCreateInfo deviceCreateInfo = {};
     deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceCreateInfo.pNext = &timelineFeatures;
     deviceCreateInfo.queueCreateInfoCount = 1;
     deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
     deviceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());

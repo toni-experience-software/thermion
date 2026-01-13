@@ -54,6 +54,7 @@ void TVulkanPlatform::destroy(filament::backend::VulkanPlatform::SwapChainPtr ha
 }
  
 VkResult TVulkanPlatform::present(SwapChainPtr handle, uint32_t index, VkSemaphore finishedDrawing) {
+  std::lock_guard lock(mutex);
   auto result = filament::backend::VulkanPlatform::present(handle, index, finishedDrawing);
   currentColorIndex = index;
   return result;
