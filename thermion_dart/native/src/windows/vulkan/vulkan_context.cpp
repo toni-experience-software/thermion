@@ -10,6 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <unordered_set>
 
 #include "filament/backend/platforms/VulkanPlatform.h"
 #include "filament/Engine.h"
@@ -111,6 +112,9 @@ class ThermionVulkanContext::Impl {
             }
 
             _platform = std::make_unique<TVulkanPlatform>();
+            _platform->SetBlitCallback([this](uint32_t index, VkSemaphore finishedDrawing) {
+                return BlitFromSwapchain(index, finishedDrawing);
+            });
 
             VkPhysicalDeviceIDProperties idProps{};
             idProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
@@ -218,16 +222,23 @@ class ThermionVulkanContext::Impl {
         }
 
         void BlitFromSwapchain() {
-            
+            if (!_platform) {
+                ERROR("No platform");
+                return;
+            }
+            BlitFromSwapchain(_platform->currentColorIndex, VK_NULL_HANDLE);
+        }
+
+        VkSemaphore BlitFromSwapchain(uint32_t index, VkSemaphore finishedDrawing) {
             std::lock_guard lock(_platform->mutex);
             if(!_platform->current) {
                 ERROR("No platform");
-                return;
+                return finishedDrawing;
             }
 
             if(_d3dTextures.size() == 0) {
                 ERROR("No D3D textures");
-                return;
+                return finishedDrawing;
             }
 
             auto&& vkTexture = _vulkanTextures.back();
@@ -239,28 +250,17 @@ class ThermionVulkanContext::Impl {
             auto width = texture->GetWidth();
 
             auto bundle = _platform->getSwapChainBundle(_platform->current);
-            VkImage swapchainImage = bundle.colors[_platform->currentColorIndex];
-
-            if (currentSemaphoreValue > 0) {
-                uint64_t waitValue = currentSemaphoreValue;
-                VkSemaphoreWaitInfo waitInfo{};
-                waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-                waitInfo.semaphoreCount = 1;
-                waitInfo.pSemaphores = &sharedSemaphore;
-                waitInfo.pValues = &waitValue;
-
-                VkResult waitResult = bluevk::vkWaitSemaphores(device, &waitInfo, UINT64_MAX);
-                if (waitResult != VK_SUCCESS) {
-                    std::cout << "Failed to wait for blit semaphore: " << waitResult << std::endl;
-                    return;
-                }
+            if (index >= bundle.colors.size()) {
+                ERROR("Swapchain image index out of range");
+                return finishedDrawing;
             }
+            VkImage swapchainImage = bundle.colors[index];
 
             VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, 0);
 
             if (result != VK_SUCCESS) {
                 std::cout << "Failed to allocate command buffer: " << result << std::endl;
-                return;
+                return finishedDrawing;
             }
 
             // Begin command buffer
@@ -271,7 +271,7 @@ class ThermionVulkanContext::Impl {
             result = bluevk::vkBeginCommandBuffer(blitCommandBuffer, &beginInfo);
             if (result != VK_SUCCESS) {
                 std::cout << "Failed to begin command buffer: " << result << std::endl;
-                return;
+                return finishedDrawing;
             }
 
             // std::cout << "Starting blit operation..." << std::endl;
@@ -279,9 +279,9 @@ class ThermionVulkanContext::Impl {
             // Pre-transition barriers
             VkImageMemoryBarrier srcBarrier{};
             srcBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            srcBarrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+            srcBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             srcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            srcBarrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            srcBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             srcBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             srcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             srcBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -293,9 +293,11 @@ class ThermionVulkanContext::Impl {
 
             VkImageMemoryBarrier dstBarrier{};
             dstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            dstBarrier.srcAccessMask = 0;
+            bool dstInitialized = _blitInitializedImages.find(image) != _blitInitializedImages.end();
+            dstBarrier.srcAccessMask = dstInitialized ? VK_ACCESS_SHADER_READ_BIT : 0;
             dstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            dstBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            dstBarrier.oldLayout = dstInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                  : VK_IMAGE_LAYOUT_UNDEFINED;
             dstBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             dstBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             dstBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -311,8 +313,8 @@ class ThermionVulkanContext::Impl {
             VkImageMemoryBarrier preBlitBarriers[] = {srcBarrier, dstBarrier};
             vkCmdPipelineBarrier(
                 blitCommandBuffer,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
-                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
                 0,
                 0, nullptr,
                 0, nullptr,
@@ -343,7 +345,7 @@ class ThermionVulkanContext::Impl {
 
             // Post-transition barriers
             srcBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            srcBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+            srcBarrier.dstAccessMask = 0;
             srcBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             srcBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
@@ -359,18 +361,19 @@ class ThermionVulkanContext::Impl {
             bluevk::vkCmdPipelineBarrier(
                 blitCommandBuffer,
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                 0,
                 0, nullptr,
                 0, nullptr,
                 2, postBlitBarriers
             );
+            _blitInitializedImages.insert(image);
 
             // End command buffer
             result = bluevk::vkEndCommandBuffer(blitCommandBuffer);
             if (result != VK_SUCCESS) {
                 std::cout << "Failed to end command buffer: " << result << std::endl;
-                return;
+                return finishedDrawing;
             }
 
             uint64_t signalValue = currentSemaphoreValue + 1;
@@ -378,8 +381,9 @@ class ThermionVulkanContext::Impl {
             // 2. Setup Timeline Submit Info
             VkTimelineSemaphoreSubmitInfo timelineInfo{};
             timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-            timelineInfo.signalSemaphoreValueCount = 1;
-            timelineInfo.pSignalSemaphoreValues = &signalValue;
+            uint64_t signalValues[] = {signalValue, 0};
+            timelineInfo.signalSemaphoreValueCount = 2;
+            timelineInfo.pSignalSemaphoreValues = signalValues;
 
             // 3. Setup Standard Submit Info
             VkSubmitInfo submitInfo{};
@@ -389,18 +393,27 @@ class ThermionVulkanContext::Impl {
             submitInfo.pCommandBuffers = &blitCommandBuffer;
             
             // Define the semaphore to signal
-            submitInfo.signalSemaphoreCount = 1;
-            submitInfo.pSignalSemaphores = &sharedSemaphore;
+            VkSemaphore signalSemaphores[] = {sharedSemaphore, blitCompleteSemaphore};
+            submitInfo.signalSemaphoreCount = 2;
+            submitInfo.pSignalSemaphores = signalSemaphores;
+
+            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            if (finishedDrawing != VK_NULL_HANDLE) {
+                submitInfo.waitSemaphoreCount = 1;
+                submitInfo.pWaitSemaphores = &finishedDrawing;
+                submitInfo.pWaitDstStageMask = &waitStage;
+            }
 
             result = bluevk::vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
             if (result != VK_SUCCESS) {
                 std::cout << "Failed to submit queue: " << result << std::endl;
                 // bluevk::vkDestroyFence(device, fence, nullptr);
-                return;
+                return finishedDrawing;
             }
 
             currentSemaphoreValue = signalValue;
             _d3dContext->SetWaitForSemaphore(signalValue);
+            return blitCompleteSemaphore;
         }
 
         void readPixelsFromImage(
@@ -610,6 +623,7 @@ class ThermionVulkanContext::Impl {
         VkQueue queue = VK_NULL_HANDLE;
 
         VkSemaphore sharedSemaphore = VK_NULL_HANDLE;
+        VkSemaphore blitCompleteSemaphore = VK_NULL_HANDLE;
         uint64_t currentSemaphoreValue = 0;
         
         std::unique_ptr<thermion::windows::d3d::D3DContext> _d3dContext;
@@ -619,6 +633,7 @@ class ThermionVulkanContext::Impl {
         
         std::unique_ptr<TVulkanPlatform> _platform;
         filament::backend::VulkanPlatform::VulkanSharedContext _sharedContext{};
+        std::unordered_set<VkImage> _blitInitializedImages;
 
         void createSyncObjects() {
             VkExportSemaphoreCreateInfo exportInfo{};
@@ -639,6 +654,13 @@ class ThermionVulkanContext::Impl {
             VkResult result = bluevk::vkCreateSemaphore(device, &semaphoreInfo, nullptr, &sharedSemaphore);
             if (result != VK_SUCCESS) {
                 std::cout << "Failed to create shared semaphore: " << result << std::endl;
+            }
+
+            VkSemaphoreCreateInfo blitSemaphoreInfo{};
+            blitSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            result = bluevk::vkCreateSemaphore(device, &blitSemaphoreInfo, nullptr, &blitCompleteSemaphore);
+            if (result != VK_SUCCESS) {
+                std::cout << "Failed to create blit completion semaphore: " << result << std::endl;
             }
         }
 

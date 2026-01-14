@@ -21,8 +21,8 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
-  objective_c: e5f8194456e8fc943e034d1af00510a1bc29c067
-  thermion_flutter: e4465bbcd6a4f5525cc38b10c7656568bbe52d22
+  objective_c: ec13431e45ba099cb734eb2829a5c1cd37986cba
+  thermion_flutter: 58fdb2f6f1401c2533cd6ac8312fa13f24ee2b5c
 
 PODFILE CHECKSUM: 1888651be91a8ad58692c1add9ce24279fd4e950
 
