@@ -39,6 +39,8 @@ namespace thermion::windows::vulkan {
       
         void BlitFromSwapchain();
 
+        HANDLE GetCurrentSurfaceHandle(HANDLE primaryHandle);
+
         void* GetSharedContext();
       
         void readPixelsFromImage(

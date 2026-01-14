@@ -25,6 +25,7 @@ namespace thermion::windows::vulkan {
  
 TVulkanPlatform::TVulkanPlatform() {
   _customization.gpu.index = -1;
+  // Filament VulkanPlatform.h: platform owns present-layout transition when set false.
   _customization.transitionSwapChainImageLayoutForPresent = false;
   TRACE("Using default Vulkan GPU selection");
 }
@@ -55,6 +56,7 @@ void TVulkanPlatform::destroy(filament::backend::VulkanPlatform::SwapChainPtr ha
 }
  
 VkResult TVulkanPlatform::present(SwapChainPtr handle, uint32_t index, VkSemaphore finishedDrawing) {
+  // Filament VulkanPlatform.h: "client should wait on finishedDrawing before presenting".
   VkSemaphore waitSemaphore = finishedDrawing;
   if (_blitCallback) {
     waitSemaphore = _blitCallback(index, finishedDrawing);

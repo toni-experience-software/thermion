@@ -9,8 +9,11 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <unordered_set>
+#include <array>
+#include <unordered_map>
 
 #include "filament/backend/platforms/VulkanPlatform.h"
 #include "filament/Engine.h"
@@ -31,7 +34,7 @@ class ThermionVulkanContext::Impl {
     public:
 
         ~Impl() {
-            std::cerr << "ThermionVulkanContext destructor " << _vulkanTextures.size() << " Vulkan textures / " << _d3dTextures.size() << " D3D textures remain" << std::endl;
+            std::cerr << "ThermionVulkanContext destructor " << _surfaces.size() << " surfaces remain" << std::endl;
             _d3dContext = std::nullptr_t();
         }
         
@@ -174,46 +177,52 @@ class ThermionVulkanContext::Impl {
             
             Log("Creating Vulkan texture %dx%d", width, height);
 
-            // creates the D3D texture
-            auto d3dTexture = _d3dContext->CreateTexture(width, height);
-            auto d3dTextureHandle = d3dTexture->GetTextureHandle();
-            auto vkTexture = VulkanTexture::create(device, physicalDevice, width, height, d3dTextureHandle);
-
-            if(!vkTexture) {
-                return NULL;
+            std::lock_guard surfaceLock(_surfaceMutex);
+            std::array<std::unique_ptr<thermion::windows::d3d::D3DTexture>, 2> d3dTextures;
+            std::array<std::unique_ptr<thermion::windows::vulkan::VulkanTexture>, 2> vkTextures;
+            for (size_t i = 0; i < d3dTextures.size(); ++i) {
+                d3dTextures[i] = _d3dContext->CreateTexture(width, height);
+                if (!d3dTextures[i]) {
+                    ERROR("Failed to create D3D texture");
+                    return NULL;
+                }
+                auto d3dTextureHandle = d3dTextures[i]->GetTextureHandle();
+                vkTextures[i] = VulkanTexture::create(device, physicalDevice, width, height, d3dTextureHandle);
+                if(!vkTextures[i]) {
+                    ERROR("Failed to create Vulkan texture");
+                    return NULL;
+                }
             }
 
             // fillImageWithColor(device, commandPool, queue, image, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED,  // Current image layout
             //     { width, height, 1 }, // Image extent
             //     0.0f, 1.0f, 0.0f, 1.0f);    // Red color (RGBA))
-            
-            _d3dTextures.push_back(std::move(d3dTexture));
-            _vulkanTextures.push_back(std::move(vkTexture));
-            return d3dTextureHandle;
+            HANDLE primaryHandle = d3dTextures[0]->GetTextureHandle();
+            SurfaceBuffers buffers;
+            buffers.width = width;
+            buffers.height = height;
+            buffers.d3d = std::move(d3dTextures);
+            buffers.vk = std::move(vkTextures);
+            buffers.readIndex = 0;
+            buffers.writeIndex = 1;
+            _surfaces.emplace(primaryHandle, std::move(buffers));
+            _currentSurfaceHandle = primaryHandle;
+            return primaryHandle;
         }
     
         void DestroyRenderingSurface(HANDLE handle) {
             std::cerr << "Destroying rendering surface " << handle << std::endl;
-            auto vulkanNewEnd = std::remove_if(_vulkanTextures.begin(), _vulkanTextures.end(), [=](auto&& vkTexture) {
-                return vkTexture->GetD3DTextureHandle() == handle;
-            });
-            
-            if (vulkanNewEnd != _vulkanTextures.end()) {
-                _vulkanTextures.erase(vulkanNewEnd, _vulkanTextures.end());
-            } else { 
-                std::cerr << "Vulkan texture not found?" << std::endl;
+            std::lock_guard surfaceLock(_surfaceMutex);
+            auto it = _surfaces.find(handle);
+            if (it != _surfaces.end()) {
+                _surfaces.erase(it);
+                if (_currentSurfaceHandle == handle) {
+                    _currentSurfaceHandle = _surfaces.empty() ? NULL : _surfaces.begin()->first;
+                }
+            } else {
+                std::cerr << "Rendering surface not found?" << std::endl;
             }
-            
-            auto d3dNewEnd = std::remove_if(_d3dTextures.begin(), _d3dTextures.end(), [=](auto&& d3dTexture) {
-                return d3dTexture->GetTextureHandle() == handle;
-            });
-            
-            if (d3dNewEnd != _d3dTextures.end()) {
-                _d3dTextures.erase(d3dNewEnd, _d3dTextures.end());
-            } else { 
-                std::cerr << "D3D texture not found?" << std::endl;
-            }
-            std::cerr << "Rendering surface destroyed, " << _vulkanTextures.size() << " Vulkan textures / " << _d3dTextures.size() << " D3D textures remain" << std::endl;
+            std::cerr << "Rendering surface destroyed, " << _surfaces.size() << " surfaces remain" << std::endl;
 
         }
 
@@ -226,7 +235,8 @@ class ThermionVulkanContext::Impl {
                 ERROR("No platform");
                 return;
             }
-            BlitFromSwapchain(_platform->currentColorIndex, VK_NULL_HANDLE);
+            ERROR("BlitFromSwapchain requires a render-complete semaphore; refusing unsafe call.");
+            return;
         }
 
         VkSemaphore BlitFromSwapchain(uint32_t index, VkSemaphore finishedDrawing) {
@@ -236,18 +246,28 @@ class ThermionVulkanContext::Impl {
                 return finishedDrawing;
             }
 
-            if(_d3dTextures.size() == 0) {
+            std::lock_guard surfaceLock(_surfaceMutex);
+            if(_surfaces.empty()) {
                 ERROR("No D3D textures");
                 return finishedDrawing;
             }
 
-            auto&& vkTexture = _vulkanTextures.back();
+            auto surfaceIt = _surfaces.find(_currentSurfaceHandle);
+            if (surfaceIt == _surfaces.end()) {
+                ERROR("Current rendering surface not found");
+                return finishedDrawing;
+            }
+            auto &surface = surfaceIt->second;
+            auto &vkTexture = surface.vk[surface.writeIndex];
+            auto &d3dTexture = surface.d3d[surface.writeIndex];
+            if (!vkTexture || !d3dTexture) {
+                ERROR("Missing Vulkan or D3D texture for blit");
+                return finishedDrawing;
+            }
             auto image = vkTexture->GetImage();
 
-            auto&& texture = _d3dTextures.back();
-
-            auto height = texture->GetHeight();
-            auto width = texture->GetWidth();
+            auto height = d3dTexture->GetHeight();
+            auto width = d3dTexture->GetWidth();
 
             auto bundle = _platform->getSwapChainBundle(_platform->current);
             if (index >= bundle.colors.size()) {
@@ -255,6 +275,21 @@ class ThermionVulkanContext::Impl {
                 return finishedDrawing;
             }
             VkImage swapchainImage = bundle.colors[index];
+
+            if (currentSemaphoreValue > 0) {
+                uint64_t waitValue = currentSemaphoreValue;
+                VkSemaphoreWaitInfo waitInfo{};
+                waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                waitInfo.semaphoreCount = 1;
+                waitInfo.pSemaphores = &sharedSemaphore;
+                waitInfo.pValues = &waitValue;
+
+                VkResult waitResult = bluevk::vkWaitSemaphores(device, &waitInfo, UINT64_MAX);
+                if (waitResult != VK_SUCCESS) {
+                    std::cout << "Failed to wait for blit semaphore: " << waitResult << std::endl;
+                    return finishedDrawing;
+                }
+            }
 
             VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, 0);
 
@@ -281,6 +316,7 @@ class ThermionVulkanContext::Impl {
             srcBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
             srcBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             srcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            // Filament VulkanPlatform.h: transitionSwapChainImageLayoutForPresent=false => platform owns layout.
             srcBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             srcBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             srcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -397,8 +433,9 @@ class ThermionVulkanContext::Impl {
             submitInfo.signalSemaphoreCount = 2;
             submitInfo.pSignalSemaphores = signalSemaphores;
 
-            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
             if (finishedDrawing != VK_NULL_HANDLE) {
+                // Filament VulkanPlatform.h: platform must wait on finishedDrawing before present.
                 submitInfo.waitSemaphoreCount = 1;
                 submitInfo.pWaitSemaphores = &finishedDrawing;
                 submitInfo.pWaitDstStageMask = &waitStage;
@@ -413,6 +450,8 @@ class ThermionVulkanContext::Impl {
 
             currentSemaphoreValue = signalValue;
             _d3dContext->SetWaitForSemaphore(signalValue);
+            surface.readIndex = surface.writeIndex;
+            surface.writeIndex = (surface.writeIndex + 1) % surface.vk.size();
             return blitCompleteSemaphore;
         }
 
@@ -421,8 +460,19 @@ class ThermionVulkanContext::Impl {
             uint32_t height,
             std::vector<uint8_t>& outPixels) {
 
-            auto&& vkTexture = _vulkanTextures.back();
-            auto image = vkTexture->GetImage();
+            std::lock_guard surfaceLock(_surfaceMutex);
+            if (_surfaces.empty()) {
+                throw std::runtime_error("No rendering surfaces available");
+            }
+            auto surfaceIt = _surfaces.find(_currentSurfaceHandle);
+            if (surfaceIt == _surfaces.end()) {
+                throw std::runtime_error("Current rendering surface not found");
+            }
+            auto &surface = surfaceIt->second;
+            if (!surface.vk[surface.readIndex]) {
+                throw std::runtime_error("No Vulkan texture available for readback");
+            }
+            auto image = surface.vk[surface.readIndex]->GetImage();
         
             VkDeviceSize bufferSize = width * height * 4; // RGBA8 format
             
@@ -613,6 +663,19 @@ class ThermionVulkanContext::Impl {
         void* GetSharedContext() {
             return &_sharedContext;
         }
+
+        HANDLE GetCurrentSurfaceHandle(HANDLE primaryHandle) {
+            std::lock_guard surfaceLock(_surfaceMutex);
+            auto it = _surfaces.find(primaryHandle);
+            if (it == _surfaces.end()) {
+                return NULL;
+            }
+            auto &surface = it->second;
+            if (!surface.d3d[surface.readIndex]) {
+                return NULL;
+            }
+            return surface.d3d[surface.readIndex]->GetTextureHandle();
+        }
     
     private:
         VkInstance instance = VK_NULL_HANDLE;
@@ -628,8 +691,17 @@ class ThermionVulkanContext::Impl {
         
         std::unique_ptr<thermion::windows::d3d::D3DContext> _d3dContext;
     
-        std::vector<std::unique_ptr<thermion::windows::d3d::D3DTexture>> _d3dTextures;
-        std::vector<std::unique_ptr<thermion::windows::vulkan::VulkanTexture>> _vulkanTextures;
+        struct SurfaceBuffers {
+            std::array<std::unique_ptr<thermion::windows::d3d::D3DTexture>, 2> d3d;
+            std::array<std::unique_ptr<thermion::windows::vulkan::VulkanTexture>, 2> vk;
+            uint32_t width = 0;
+            uint32_t height = 0;
+            size_t readIndex = 0;
+            size_t writeIndex = 0;
+        };
+        std::unordered_map<HANDLE, SurfaceBuffers> _surfaces;
+        HANDLE _currentSurfaceHandle = NULL;
+        std::mutex _surfaceMutex;
         
         std::unique_ptr<TVulkanPlatform> _platform;
         filament::backend::VulkanPlatform::VulkanSharedContext _sharedContext{};
@@ -688,6 +760,10 @@ void* ThermionVulkanContext::GetSharedContext() {
 
 void ThermionVulkanContext::BlitFromSwapchain() {
     pImpl->BlitFromSwapchain();
+}
+
+HANDLE ThermionVulkanContext::GetCurrentSurfaceHandle(HANDLE primaryHandle) {
+    return pImpl->GetCurrentSurfaceHandle(primaryHandle);
 }
 
 void ThermionVulkanContext::readPixelsFromImage(

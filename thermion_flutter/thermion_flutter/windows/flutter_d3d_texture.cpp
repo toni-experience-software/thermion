@@ -11,7 +11,11 @@
 namespace thermion::tflutter::windows
 {
 
-  FlutterD3DTexture::FlutterD3DTexture(HANDLE d3dTexture2DHandle, uint32_t width, uint32_t height) : _width(width), _height(height)
+  FlutterD3DTexture::FlutterD3DTexture(HANDLE d3dTexture2DHandle, uint32_t width, uint32_t height)
+      : _width(width),
+        _height(height),
+        _primaryD3DTexture2DHandle(d3dTexture2DHandle),
+        _currentD3DTexture2DHandle(d3dTexture2DHandle)
   {
     _textureDescriptor = std::make_unique<FlutterDesktopGpuSurfaceDescriptor>();
     _textureDescriptor->struct_size = sizeof(FlutterDesktopGpuSurfaceDescriptor);
@@ -45,6 +49,10 @@ namespace thermion::tflutter::windows
     return _textureDescriptor->handle;
   }
 
+  HANDLE FlutterD3DTexture::GetPrimaryD3DTextureHandle() { 
+    return _primaryD3DTexture2DHandle;
+  }
+
   void FlutterD3DTexture::SetFlutterTextureId(int64_t textureId) {
     _flutterTextureId = textureId;
   }
@@ -52,6 +60,11 @@ namespace thermion::tflutter::windows
   int64_t FlutterD3DTexture::GetFlutterTextureId()
   {
     return _flutterTextureId;
+  }
+
+  void FlutterD3DTexture::SetD3DTextureHandle(HANDLE d3dTexture2DHandle) {
+    _currentD3DTexture2DHandle = d3dTexture2DHandle;
+    _textureDescriptor->handle = d3dTexture2DHandle;
   }
 
 }

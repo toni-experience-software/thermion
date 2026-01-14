@@ -18,15 +18,17 @@ namespace thermion::tflutter::windows {
             ~FlutterD3DTexture();
             ::flutter::TextureVariant* GetFlutterTexture();
             HANDLE GetD3DTextureHandle();
+            HANDLE GetPrimaryD3DTextureHandle();
             int64_t GetFlutterTextureId();
             void SetFlutterTextureId(int64_t textureId);
+            void SetD3DTextureHandle(HANDLE d3dTexture2DHandle);
         private:
             uint32_t _width;
             uint32_t _height;
             std::unique_ptr<FlutterDesktopGpuSurfaceDescriptor> _textureDescriptor = nullptr;
             std::unique_ptr<::flutter::TextureVariant> _texture;
             int64_t _flutterTextureId = -1;    
-            HANDLE _d3dTexture2DHandle;
+            HANDLE _primaryD3DTexture2DHandle;
+            HANDLE _currentD3DTexture2DHandle;
     };
 }
-

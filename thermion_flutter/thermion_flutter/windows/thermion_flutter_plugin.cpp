@@ -197,6 +197,16 @@ namespace thermion::tflutter::windows
           std::cout << "Bad texture" << std::endl;
           return;
         }
+        for (auto &flutterTexture : _flutterTextures) {
+          if (flutterTexture->GetFlutterTextureId() == *flutterTextureId) {
+            HANDLE primaryHandle = flutterTexture->GetPrimaryD3DTextureHandle();
+            HANDLE currentHandle = _context->GetCurrentSurfaceHandle(primaryHandle);
+            if (currentHandle && currentHandle != flutterTexture->GetD3DTextureHandle()) {
+              flutterTexture->SetD3DTextureHandle(currentHandle);
+            }
+            break;
+          }
+        }
         // std::cout << "Marking texture" << (*flutterTextureId) << "available" << std::endl;
         _textureRegistrar->MarkTextureFrameAvailable(*flutterTextureId);
       } else { 
