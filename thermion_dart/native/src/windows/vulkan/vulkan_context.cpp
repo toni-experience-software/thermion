@@ -111,6 +111,9 @@ class ThermionVulkanContext::Impl {
             }
 
             _platform = std::make_unique<TVulkanPlatform>();
+            _platform->SetBlitCallback([this](uint32_t index, VkSemaphore finishedDrawing) {
+                return BlitFromSwapchain(index, finishedDrawing);
+            });
 
             VkPhysicalDeviceIDProperties idProps{};
             idProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
@@ -363,8 +366,9 @@ class ThermionVulkanContext::Impl {
             // 2. Setup Timeline Submit Info
             VkTimelineSemaphoreSubmitInfo timelineInfo{};
             timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-            timelineInfo.signalSemaphoreValueCount = 1;
-            timelineInfo.pSignalSemaphoreValues = &signalValue;
+            uint64_t signalValues[] = {signalValue, 0};
+            timelineInfo.signalSemaphoreValueCount = 2;
+            timelineInfo.pSignalSemaphoreValues = signalValues;
 
             // 3. Setup Standard Submit Info
             VkSubmitInfo submitInfo{};
@@ -387,6 +391,167 @@ class ThermionVulkanContext::Impl {
                 // bluevk::vkDestroyFence(device, fence, nullptr);
                 return;
             }
+        }
+
+        VkSemaphore BlitFromSwapchain(uint32_t index, VkSemaphore finishedDrawing) {
+            std::lock_guard lock(_platform->mutex);
+            if(!_platform->current) {
+                ERROR("No platform");
+                return finishedDrawing;
+            }
+
+            if(_d3dTextures.size() == 0) {
+                ERROR("No D3D textures");
+                return finishedDrawing;
+            }
+
+            auto&& vkTexture = _vulkanTextures.back();
+            auto image = vkTexture->GetImage();
+
+            auto&& texture = _d3dTextures.back();
+
+            auto height = texture->GetHeight();
+            auto width = texture->GetWidth();
+
+            auto bundle = _platform->getSwapChainBundle(_platform->current);
+            if (index >= bundle.colors.size()) {
+                ERROR("Swapchain image index out of range");
+                return finishedDrawing;
+            }
+            VkImage swapchainImage = bundle.colors[index];
+
+            VkResult result = bluevk::vkResetCommandBuffer(blitCommandBuffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+
+            if (result != VK_SUCCESS) {
+                std::cout << "Failed to allocate command buffer: " << result << std::endl;
+                return finishedDrawing;
+            }
+
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            
+            result = bluevk::vkBeginCommandBuffer(blitCommandBuffer, &beginInfo);
+            if (result != VK_SUCCESS) {
+                std::cout << "Failed to begin command buffer: " << result << std::endl;
+                return finishedDrawing;
+            }
+            
+            VkImageMemoryBarrier srcBarrier{};
+            srcBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            srcBarrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+            srcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            srcBarrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            srcBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            srcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            srcBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            srcBarrier.image = swapchainImage;
+            srcBarrier.subresourceRange = {
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0, 1, 0, 1
+            };
+
+            VkImageMemoryBarrier dstBarrier{};
+            dstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            dstBarrier.srcAccessMask = 0;
+            dstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            dstBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            dstBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            dstBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            dstBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            dstBarrier.image = image;
+            dstBarrier.subresourceRange = {
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0, 1, 0, 1
+            };
+
+            VkImageMemoryBarrier preBlitBarriers[] = {srcBarrier, dstBarrier};
+            vkCmdPipelineBarrier(
+                blitCommandBuffer,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                0,
+                0, nullptr,
+                0, nullptr,
+                2, preBlitBarriers
+            );
+
+            VkImageBlit blit{};
+            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit.srcOffsets[0] = {0, 0, 0};
+            blit.srcOffsets[1] = {static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit.dstOffsets[0] = {0, 0, 0};
+            blit.dstOffsets[1] = {static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+
+            bluevk::vkCmdBlitImage(
+                blitCommandBuffer,
+                swapchainImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &blit,
+                VK_FILTER_NEAREST 
+            );
+
+            srcBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            srcBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+            srcBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            srcBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+            dstBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            dstBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            dstBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            dstBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+            VkImageMemoryBarrier postBlitBarriers[] = {srcBarrier, dstBarrier};
+            bluevk::vkCmdPipelineBarrier(
+                blitCommandBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 
+                0,
+                0, nullptr,
+                0, nullptr,
+                2, postBlitBarriers
+            );
+
+            result = bluevk::vkEndCommandBuffer(blitCommandBuffer);
+            if (result != VK_SUCCESS) {
+                std::cout << "Failed to end command buffer: " << result << std::endl;
+                return finishedDrawing;
+            }
+
+            uint64_t signalValue = ++currentSemaphoreValue;
+
+            VkTimelineSemaphoreSubmitInfo timelineInfo{};
+            timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            timelineInfo.signalSemaphoreValueCount = 1;
+            timelineInfo.pSignalSemaphoreValues = &signalValue;
+
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.pNext = &timelineInfo;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &blitCommandBuffer;
+            submitInfo.signalSemaphoreCount = 2;
+            VkSemaphore signalSemaphores[] = {sharedSemaphore, blitCompleteSemaphore};
+            submitInfo.pSignalSemaphores = signalSemaphores;
+
+            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            if (finishedDrawing != VK_NULL_HANDLE) {
+                submitInfo.waitSemaphoreCount = 1;
+                submitInfo.pWaitSemaphores = &finishedDrawing;
+                submitInfo.pWaitDstStageMask = &waitStage;
+            }
+
+            result = bluevk::vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+
+            _d3dContext->SetWaitForSemaphore(signalValue);
+
+            if (result != VK_SUCCESS) {
+                std::cout << "Failed to submit queue: " << result << std::endl;
+                return finishedDrawing;
+            }
+
+            return blitCompleteSemaphore;
         }
 
         void readPixelsFromImage(
@@ -596,6 +761,7 @@ class ThermionVulkanContext::Impl {
         VkQueue queue = VK_NULL_HANDLE;
 
         VkSemaphore sharedSemaphore = VK_NULL_HANDLE;
+        VkSemaphore blitCompleteSemaphore = VK_NULL_HANDLE;
         uint64_t currentSemaphoreValue = 0;
         
         std::unique_ptr<thermion::windows::d3d::D3DContext> _d3dContext;
@@ -625,6 +791,13 @@ class ThermionVulkanContext::Impl {
             VkResult result = bluevk::vkCreateSemaphore(device, &semaphoreInfo, nullptr, &sharedSemaphore);
             if (result != VK_SUCCESS) {
                 std::cout << "Failed to create shared semaphore: " << result << std::endl;
+            }
+
+            VkSemaphoreCreateInfo blitSemaphoreInfo{};
+            blitSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            result = bluevk::vkCreateSemaphore(device, &blitSemaphoreInfo, nullptr, &blitCompleteSemaphore);
+            if (result != VK_SUCCESS) {
+                std::cout << "Failed to create blit completion semaphore: " << result << std::endl;
             }
         }
 

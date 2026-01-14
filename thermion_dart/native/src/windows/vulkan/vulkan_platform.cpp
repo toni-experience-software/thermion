@@ -54,9 +54,18 @@ void TVulkanPlatform::destroy(filament::backend::VulkanPlatform::SwapChainPtr ha
 }
  
 VkResult TVulkanPlatform::present(SwapChainPtr handle, uint32_t index, VkSemaphore finishedDrawing) {
-  auto result = filament::backend::VulkanPlatform::present(handle, index, finishedDrawing);
+  // Filament VulkanPlatform.h: client should wait on finishedDrawing before presenting.
+  VkSemaphore waitSemaphore = finishedDrawing;
+  if (_blitCallback) {
+    waitSemaphore = _blitCallback(index, finishedDrawing);
+  }
+  auto result = filament::backend::VulkanPlatform::present(handle, index, waitSemaphore);
   currentColorIndex = index;
   return result;
+}
+
+void TVulkanPlatform::SetBlitCallback(std::function<VkSemaphore(uint32_t, VkSemaphore)> callback) {
+  _blitCallback = std::move(callback);
 }
  
 }

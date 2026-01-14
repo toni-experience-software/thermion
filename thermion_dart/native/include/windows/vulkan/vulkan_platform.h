@@ -4,6 +4,7 @@
 #include "vulkan_texture.h"
 #include "vulkan_utils.h"
 
+#include <functional>
 #include <mutex>
 
 #include <Windows.h>
@@ -30,12 +31,14 @@ class TVulkanPlatform : public filament::backend::VulkanPlatform {
        void destroy(SwapChainPtr handle) override;
  
        VkResult present(SwapChainPtr handle, uint32_t index, VkSemaphore finishedDrawing) override;
+       void SetBlitCallback(std::function<VkSemaphore(uint32_t, VkSemaphore)> callback);
        
        SwapChainPtr current = std::nullptr_t();
        std::mutex mutex;
        uint32_t currentColorIndex = 0;
      
       private:  
+       std::function<VkSemaphore(uint32_t, VkSemaphore)> _blitCallback;
        filament::backend::VulkanPlatform::Customization _customization;
  
  };
