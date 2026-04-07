@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include <utils/ostream.h>
 #include "filament/backend/Platform.h"
 #include "filament/backend/platforms/VulkanPlatform.h"
 
