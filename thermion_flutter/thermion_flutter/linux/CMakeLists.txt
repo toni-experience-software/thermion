@@ -26,11 +26,34 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 # So relative path from CMAKE_BINARY_DIR is ../../../native_assets/linux/
 set(NATIVE_ASSETS_DIR "${CMAKE_BINARY_DIR}/../../../native_assets/linux")
 
+# Prefer hook-generated headers when available.
+set(GENERATED_HEADERS_CMAKE "${CMAKE_CURRENT_SOURCE_DIR}/../.dart_tool/generated_headers.cmake")
+if(EXISTS "${GENERATED_HEADERS_CMAKE}")
+  include("${GENERATED_HEADERS_CMAKE}")
+endif()
+
+# Fallback: derive from monorepo sibling layout.
+if(NOT DART_PKG_HEADERS)
+  get_filename_component(_THERMION_DART
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../thermion_dart" ABSOLUTE)
+  if(IS_DIRECTORY "${_THERMION_DART}/native/include")
+    set(DART_PKG_HEADERS
+      "${_THERMION_DART}/native/include"
+      "${_THERMION_DART}/native/include/filament"
+      "$<IF:$<CONFIG:Debug>,${_THERMION_DART}/native/include/filament/debug,${_THERMION_DART}/native/include/filament/release>"
+      "${_THERMION_DART}/native/include/vulkan/linux"
+      "${_THERMION_DART}/native/include/opengl/linux"
+    )
+  endif()
+endif()
+
+if(NOT DART_PKG_HEADERS)
+  message(FATAL_ERROR "thermion_flutter: cannot locate thermion_dart headers. "
+    "Ensure the build hook has run or thermion_dart is a sibling package.")
+endif()
+
 target_include_directories(${PLUGIN_NAME} PRIVATE "${NATIVE_ASSETS_DIR}")
-target_include_directories(${PLUGIN_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../thermion_dart/native/include")
-target_include_directories(${PLUGIN_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../thermion_dart/native/include/filament")
-target_include_directories(${PLUGIN_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../thermion_dart/native/include/vulkan/linux")
-target_include_directories(${PLUGIN_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../thermion_dart/native/include/opengl/linux")
+target_include_directories(${PLUGIN_NAME} PRIVATE ${DART_PKG_HEADERS})
 target_link_directories(${PLUGIN_NAME} PRIVATE "${NATIVE_ASSETS_DIR}")
 
 # thermion_dart.so has unresolved basisu/draco encoder symbols (pulled in by
