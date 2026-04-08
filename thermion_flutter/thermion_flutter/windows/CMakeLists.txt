@@ -32,22 +32,33 @@ if(EXISTS "${GENERATED_HEADERS_CMAKE}")
   include("${GENERATED_HEADERS_CMAKE}")
 endif()
 
-# Fallback: derive from monorepo sibling layout.
+# Fallback: resolve thermion_dart root from the consuming app's package_config.json.
+# CMAKE_SOURCE_DIR is <app>/windows/; package_config.json is at <app>/.dart_tool/.
 if(NOT DART_PKG_HEADERS)
-  get_filename_component(_THERMION_DART
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../thermion_dart" ABSOLUTE)
-  if(IS_DIRECTORY "${_THERMION_DART}/native/include")
-    set(DART_PKG_HEADERS
-      "${_THERMION_DART}/native/include"
-      "${_THERMION_DART}/native/include/filament"
-      "$<IF:$<CONFIG:Debug>,${_THERMION_DART}/native/include/filament/debug,${_THERMION_DART}/native/include/filament/release>"
-    )
+  set(_PKG_CONFIG "${CMAKE_SOURCE_DIR}/../.dart_tool/package_config.json")
+  if(EXISTS "${_PKG_CONFIG}")
+    file(READ "${_PKG_CONFIG}" _PKG_JSON)
+    string(REGEX MATCH "\"name\":[ ]*\"thermion_dart\"[^}]*\"rootUri\":[ ]*\"([^\"]+)\"" _ "${_PKG_JSON}")
+    if(CMAKE_MATCH_1)
+      set(_URI "${CMAKE_MATCH_1}")
+      string(REGEX REPLACE "^file://" "" _URI "${_URI}")
+      if(NOT IS_ABSOLUTE "${_URI}")
+        get_filename_component(_URI "${CMAKE_SOURCE_DIR}/../.dart_tool/${_URI}" ABSOLUTE)
+      endif()
+      if(IS_DIRECTORY "${_URI}/native/include")
+        set(DART_PKG_HEADERS
+          "${_URI}/native/include"
+          "${_URI}/native/include/filament"
+          "$<IF:$<CONFIG:Debug>,${_URI}/native/include/filament/debug,${_URI}/native/include/filament/release>"
+        )
+      endif()
+    endif()
   endif()
 endif()
 
 if(NOT DART_PKG_HEADERS)
   message(FATAL_ERROR "thermion_flutter: cannot locate thermion_dart headers. "
-    "Ensure the build hook has run or thermion_dart is a sibling package.")
+    "Ensure the build hook has run or thermion_dart is listed in package_config.json.")
 endif()
 
 target_include_directories(${PLUGIN_NAME} PRIVATE
