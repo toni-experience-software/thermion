@@ -35,24 +35,35 @@ endif()
 # Fallback: resolve thermion_dart root from the consuming app's package_config.json.
 # CMAKE_SOURCE_DIR is <app>/windows/; package_config.json is at <app>/.dart_tool/.
 if(NOT DART_PKG_HEADERS)
-  set(_PKG_CONFIG "${CMAKE_SOURCE_DIR}/../.dart_tool/package_config.json")
+  set(_APP_ROOT "${CMAKE_SOURCE_DIR}/..")
+  set(_PKG_CONFIG "${_APP_ROOT}/.dart_tool/package_config.json")
   if(EXISTS "${_PKG_CONFIG}")
     file(READ "${_PKG_CONFIG}" _PKG_JSON)
     string(REGEX MATCH "\"name\":[ ]*\"thermion_dart\"[^}]*\"rootUri\":[ ]*\"([^\"]+)\"" _ "${_PKG_JSON}")
     if(CMAKE_MATCH_1)
       set(_URI "${CMAKE_MATCH_1}")
+      # Convert file:// URI to filesystem path.
+      # file:///C:/path → /C:/path after stripping file://, then strip leading / before drive letter.
       string(REGEX REPLACE "^file://" "" _URI "${_URI}")
+      string(REGEX REPLACE "^/([A-Za-z]:)" "\\1" _URI "${_URI}")
       if(NOT IS_ABSOLUTE "${_URI}")
-        get_filename_component(_URI "${CMAKE_SOURCE_DIR}/../.dart_tool/${_URI}" ABSOLUTE)
+        get_filename_component(_URI "${_APP_ROOT}/.dart_tool/${_URI}" ABSOLUTE)
       endif()
+      message(STATUS "thermion_flutter: resolved thermion_dart root: ${_URI}")
       if(IS_DIRECTORY "${_URI}/native/include")
         set(DART_PKG_HEADERS
           "${_URI}/native/include"
           "${_URI}/native/include/filament"
           "$<IF:$<CONFIG:Debug>,${_URI}/native/include/filament/debug,${_URI}/native/include/filament/release>"
         )
+      else()
+        message(STATUS "thermion_flutter: ${_URI}/native/include does not exist")
       endif()
+    else()
+      message(STATUS "thermion_flutter: thermion_dart not found in ${_PKG_CONFIG}")
     endif()
+  else()
+    message(STATUS "thermion_flutter: ${_PKG_CONFIG} not found")
   endif()
 endif()
 
