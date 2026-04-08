@@ -72,6 +72,11 @@ if(NOT DART_PKG_HEADERS)
     "Ensure the build hook has run or thermion_dart is listed in package_config.json.")
 endif()
 
+# Public header dir must be INTERFACE so the runner can find
+# thermion_flutter/thermion_flutter_plugin_c_api.h.
+target_include_directories(${PLUGIN_NAME} INTERFACE
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
 target_include_directories(${PLUGIN_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
   "${CMAKE_CURRENT_SOURCE_DIR}"
